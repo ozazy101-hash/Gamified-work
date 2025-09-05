@@ -10,6 +10,21 @@
 <body class="min-h-screen">
   <div id="root"></div>
 
+  <script>
+  addEventListener('error', e => {
+    const pre=document.createElement('pre');
+    pre.style.cssText='white-space:pre-wrap;background:#fee;border:1px solid #f99;padding:8px;margin:8px';
+    pre.textContent='JS error: ' + e.message + '\n' + (e.error && e.error.stack || '');
+    document.body.prepend(pre);
+  });
+  addEventListener('unhandledrejection', e => {
+    const pre=document.createElement('pre');
+    pre.style.cssText='white-space:pre-wrap;background:#eef;border:1px solid #99f;padding:8px;margin:8px';
+    pre.textContent='Promise rejection: ' + (e.reason && (e.reason.stack || e.reason.message) || e.reason);
+    document.body.prepend(pre);
+  });
+</script>
+
  <!-- React + ReactDOM (UMD) -->
 <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
