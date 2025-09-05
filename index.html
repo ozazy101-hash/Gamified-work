@@ -1,0 +1,678 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FocusQuest v2.1</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="icon" href="data:," />
+</head>
+<body class="min-h-screen">
+  <div id="root"></div>
+
+  <!-- React + ReactDOM (UMD) -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <!-- Babel so we can write JSX in this one file -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script type="text/babel">
+    const { useEffect, useRef, useState } = React;
+
+    // ---------- Utilities ----------
+    const uid = () => Math.random().toString(36).slice(2, 9);
+    const todayKey = () => new Date().toISOString().slice(0, 10);
+    const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
+    const msToClock = (ms) => {
+      const s = Math.floor(ms / 1000);
+      const m = Math.floor(s / 60);
+      const remS = s % 60;
+      return `${String(m).padStart(2, "0")}:${String(remS).padStart(2, "0")}`;
+    };
+
+    function computeReward(estimateMin, actualMin) {
+      const base = Math.max(1, Math.round(estimateMin / 15));
+      if (actualMin <= estimateMin) {
+        const savePct = (estimateMin - actualMin) / Math.max(estimateMin, 1);
+        const bonus = Math.floor(savePct * base * 1.6) + (savePct > 0 ? 1 : 0);
+        const steps = clamp(base + bonus, 1, 12);
+        const coins = 5 + Math.floor(savePct * 25) + base;
+        return { steps, coins, beat: true };
+      } else {
+        const overPct = (actualMin - estimateMin) / Math.max(estimateMin, 1);
+        const penalty = Math.ceil(overPct * base * 1.2);
+        const steps = clamp(base - penalty, 1, 12);
+        const coins = Math.max(1, base - penalty);
+        return { steps, coins, beat: false };
+      }
+    }
+
+    // ---------- Gear & Shop ----------
+    const DEFAULT_GEAR_SHOP = [
+      { id: "armor-leather", name: "Leather Armor", type: "armor", price: 40, owned: false, tier: 1 },
+      { id: "armor-chain", name: "Chainmail", type: "armor", price: 90, owned: false, tier: 2 },
+      { id: "armor-plate", name: "Plate Armor", type: "armor", price: 160, owned: false, tier: 3 },
+      { id: "weapon-dagger", name: "Dagger", type: "weapon", price: 45, owned: false, tier: 1 },
+      { id: "weapon-sword", name: "Longsword", type: "weapon", price: 100, owned: false, tier: 2 },
+      { id: "weapon-greatsword", name: "Greatsword", type: "weapon", price: 170, owned: false, tier: 3 },
+      { id: "mod-sharpening", name: "Sharpening Kit", type: "mod", price: 60, owned: false, tier: 1 },
+      { id: "mod-quickdraw", name: "Quickdraw Strap", type: "mod", price: 70, owned: false, tier: 1 },
+      { id: "mod-adrenaline", name: "Adrenaline Vial", type: "mod", price: 90, owned: false, tier: 1 },
+    ];
+    const ARMOR_TIME_BONUS = { "armor-leather": 100, "armor-chain": 160, "armor-plate": 220 };
+    const WEAPON_DMG_BONUS = { "weapon-dagger": 10, "weapon-sword": 18, "weapon-greatsword": 26 };
+    const MOD_BONUSES = {
+      "mod-sharpening": { dmg: 6, time: 0, grace: 0 },
+      "mod-quickdraw": { dmg: 0, time: 80, grace: 0 },
+      "mod-adrenaline": { dmg: 0, time: 0, grace: 1 },
+    };
+    const sumBonuses = (armorId, weaponId, modIds) => {
+      const time = (ARMOR_TIME_BONUS[armorId] || 0) + modIds.reduce((a, id) => a + (MOD_BONUSES[id]?.time || 0), 0);
+      const dmg = (WEAPON_DMG_BONUS[weaponId] || 0) + modIds.reduce((a, id) => a + (MOD_BONUSES[id]?.dmg || 0), 0);
+      const grace = modIds.reduce((a, id) => a + (MOD_BONUSES[id]?.grace || 0), 0);
+      return { time, dmg, grace };
+    };
+
+    // ---------- Persistence ----------
+    const LS_KEY = "focusquest:v2.1";
+    const loadState = () => { try { const raw = localStorage.getItem(LS_KEY); return raw ? JSON.parse(raw) : null; } catch { return null; } };
+    const saveState = (state) => { try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch {} };
+
+    // ---------- Demo tasks ----------
+    const demoTasks = () => ([
+      { id: uid(), title: "Warm-up: Inbox Zero", estimateMin: 15, elapsedMs: 0, status: "pending", startedAt: null, completedAt: null, stepsEarned: 0, coinsEarned: 0, beatEstimate: false },
+      { id: uid(), title: "Deep Work: Spec Draft", estimateMin: 50, elapsedMs: 0, status: "pending", startedAt: null, completedAt: null, stepsEarned: 0, coinsEarned: 0, beatEstimate: false },
+      { id: uid(), title: "Quick Win: Call Back Sam", estimateMin: 10, elapsedMs: 0, status: "pending", startedAt: null, completedAt: null, stepsEarned: 0, coinsEarned: 0, beatEstimate: false },
+    ]);
+
+    // ---------- Subcomponents ----------
+    function TaskCreator({ onAdd }) {
+      const [title, setTitle] = useState("");
+      const [min, setMin] = useState(25);
+      return (
+        <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
+          <input className="sm:col-span-7 rounded-xl border border-zinc-300 bg-white px-3 py-2 text-sm" placeholder="Task title (e.g., Write project summary)" value={title} onChange={(e) => setTitle(e.target.value)} />
+          <input type="number" className="sm:col-span-3 rounded-xl border border-zinc-300 bg-white px-3 py-2 text-sm" placeholder="Min" value={min} min={1} max={240} onChange={(e) => setMin(parseInt(e.target.value || "0"))} />
+          <button className="sm:col-span-2 rounded-xl bg-sky-600 px-3 py-2 text-sm font-semibold text-white hover:bg-sky-700" onClick={() => { if (!title.trim()) return; onAdd(title.trim(), Math.max(1, min)); setTitle(""); setMin(25); }}>Add</button>
+        </div>
+      );
+    }
+
+    const BadgeItem = ({ active, label, hint }) => (
+      <div className={\`rounded-xl border p-3 \${active ? "border-emerald-400 bg-emerald-50" : "border-zinc-200 bg-white"}\`}>
+        <div className="text-sm font-semibold">{label} {active ? "✅" : ""}</div>
+        <div className="text-xs text-zinc-600">{hint}</div>
+      </div>
+    );
+
+    function TaskRow({ task, onStart, onPause, onReset, onComplete, onDelete }) {
+      return (
+        <div className="rounded-xl border border-zinc-200 bg-white p-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm font-semibold">{task.title}</div>
+              <div className="text-xs text-zinc-600">Est {task.estimateMin}m • Elapsed {msToClock(task.elapsedMs)}</div>
+            </div>
+            <div className="flex items-center gap-2">
+              {task.status !== "done" && <>
+                {task.status === "in-progress" ? (
+                  <button className="rounded-lg border border-zinc-300 bg-white px-2 py-1 text-sm hover:bg-zinc-50" onClick={onPause}>Pause</button>
+                ) : (
+                  <button className="rounded-lg bg-emerald-500 px-2 py-1 text-sm font-semibold text-white hover:bg-emerald-600" onClick={onStart}>Start</button>
+                )}
+                <button className="rounded-lg border border-zinc-300 bg-white px-2 py-1 text-sm hover:bg-zinc-50" onClick={onReset}>Reset</button>
+                <button className="rounded-lg bg-sky-600 px-2 py-1 text-sm font-semibold text-white hover:bg-sky-700" onClick={onComplete}>Complete</button>
+              </>}
+              {task.status === "done" && (
+                <div className="flex items-center gap-2 text-xs">
+                  <span className={\`rounded-full px-2 py-1 \${task.beatEstimate ? "bg-emerald-100 text-emerald-700" : "bg-zinc-100 text-zinc-700"}\`}>{task.beatEstimate ? "Beat" : "Finished"}</span>
+                  <span className="text-zinc-600">+{task.stepsEarned} steps • 🪙 {task.coinsEarned}</span>
+                  <button className="rounded-lg border border-zinc-300 bg-white px-2 py-1 text-xs hover:bg-zinc-50" onClick={onDelete}>Delete</button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    const SmallStat = ({ label, value, hint }) => (
+      <div className="rounded-xl bg-white/70 backdrop-blur border border-zinc-200 p-3">
+        <div className="text-xs uppercase tracking-wide text-zinc-500">{label}</div>
+        <div className="text-lg font-semibold text-zinc-900">{value}</div>
+        {hint && <div className="text-[11px] text-zinc-500">{hint}</div>}
+      </div>
+    );
+
+    const SectionCard = ({ title, children, right }) => (
+      <div className="rounded-2xl border border-zinc-200 bg-white shadow-sm">
+        <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-3">
+          <h2 className="text-sm font-semibold text-zinc-800">{title}</h2>
+          {right}
+        </div>
+        <div className="p-4">{children}</div>
+      </div>
+    );
+
+    const Tile = ({ index, active, isMid, isEnd }) => (
+      <div className={\`relative h-10 w-10 rounded-xl border \${active ? "border-sky-500 bg-sky-50" : "border-zinc-200 bg-white"} flex items-center justify-center text-xs text-zinc-600\`}>
+        {index + 1}
+        {isMid && <span className="absolute -top-2 right-1 text-[13px]">🗿</span>}
+        {isEnd && <span className="absolute -top-2 right-1 text-[13px]">🐉</span>}
+      </div>
+    );
+
+    const PixelAvatar = ({ armorId, weaponId }) => {
+      const armorTier = armorId === "armor-plate" ? 3 : armorId === "armor-chain" ? 2 : armorId === "armor-leather" ? 1 : 0;
+      const weaponTier = weaponId === "weapon-greatsword" ? 3 : weaponId === "weapon-sword" ? 2 : weaponId === "weapon-dagger" ? 1 : 0;
+      const armorColor = armorTier === 3 ? "#9ca3af" : armorTier === 2 ? "#6b7280" : armorTier === 1 ? "#b45309" : "#3b82f6";
+      const swordColor = "#a3a3a3"; const skin = "#f1c27d";
+      return (
+        <div className="relative">
+          <svg width="36" height="36" viewBox="0 0 14 14" shapeRendering="crispEdges" className="drop-shadow-sm">
+            <rect x="5" y="1" width="4" height="3" fill={skin} />
+            <rect x="4" y="4" width="6" height="4" fill={armorColor} />
+            <rect x="4" y="8" width="2" height="3" fill="#374151" />
+            <rect x="8" y="8" width="2" height="3" fill="#374151" />
+            <rect x="3" y="4" width="1" height="3" fill={skin} />
+            <rect x="10" y="4" width="1" height="3" fill={skin} />
+            {weaponTier > 0 && <><rect x="11" y="5" width="1" height="2" fill="#92400e" /><rect x="12" y="4" width={weaponTier === 1 ? 1 : weaponTier === 2 ? 2 : 3} height="1" fill={swordColor} /></>}
+            {armorTier === 3 && <rect x="6" y="0" width="2" height="1" fill="#9ca3af" />}
+          </svg>
+        </div>
+      );
+    };
+
+    // ---------- Main Component ----------
+    function FocusQuest() {
+      const loaded = loadState();
+      const [version] = useState(2.1);
+      const [day, setDay] = useState(loaded?.day ?? todayKey());
+      const [trackLen, setTrackLen] = useState(loaded?.trackLen ?? 30);
+      const [position, setPosition] = useState(loaded?.position ?? 0);
+      const [coins, setCoins] = useState(loaded?.coins ?? 0);
+      const [tasks, setTasks] = useState(loaded?.tasks ?? demoTasks());
+      const [shop, setShop] = useState(() => Array.isArray(loaded?.shop) ? loaded.shop : DEFAULT_GEAR_SHOP);
+      const [equippedArmor, setEquippedArmor] = useState(loaded?.equippedArmor ?? "");
+      const [equippedWeapon, setEquippedWeapon] = useState(loaded?.equippedWeapon ?? "");
+      const [equippedMods, setEquippedMods] = useState(loaded?.equippedMods ?? []);
+      const [streak, setStreak] = useState(loaded?.streak ?? 0);
+      const [lastCompleteDay, setLastCompleteDay] = useState(loaded?.lastCompleteDay ?? "");
+      const [showHelp, setShowHelp] = useState(false);
+      const [settingsOpen, setSettingsOpen] = useState(false);
+
+      // Boss state
+      const [showBoss, setShowBoss] = useState(false);
+      const [bossHP, setBossHP] = useState(100);
+      const [bossPhase, setBossPhase] = useState(0); // 0 intro, 1 active, 2 win, 3 fail
+      const [bossGrace, setBossGrace] = useState(0);
+      const [bossType, setBossType] = useState(loaded?.bossType ?? ""); // 'goblin' | 'dragon' | ''
+      const [midBossCleared, setMidBossCleared] = useState(loaded?.midBossCleared ?? false);
+      const [endBossCleared, setEndBossCleared] = useState(loaded?.endBossCleared ?? false);
+
+      const anyRunning = tasks.some((t) => t.status === "in-progress");
+
+      // Tick running tasks
+      useEffect(() => {
+        if (!anyRunning) return;
+        const id = setInterval(() => {
+          setTasks((prev) => prev.map((t) => {
+            if (t.status !== "in-progress" || !t.startedAt) return t;
+            const now = Date.now(); const add = now - t.startedAt;
+            return { ...t, elapsedMs: t.elapsedMs + add, startedAt: now };
+          }));
+        }, 250);
+        return () => clearInterval(id);
+      }, [anyRunning]);
+
+      // Persist
+      useEffect(() => {
+        saveState({
+          version, day, trackLen, position, coins, tasks, shop,
+          equippedArmor, equippedWeapon, equippedMods, streak,
+          lastCompleteDay, bossType, midBossCleared, endBossCleared,
+        });
+      }, [version, day, trackLen, position, coins, tasks, shop, equippedArmor, equippedWeapon, equippedMods, streak, lastCompleteDay, bossType, midBossCleared, endBossCleared]);
+
+      // Day rollover check
+      useEffect(() => {
+        const id = setInterval(() => { const key = todayKey(); if (key !== day) setDay(key); }, 60_000);
+        return () => clearInterval(id);
+      }, [day]);
+
+      // Derived
+      const tasksDone = tasks.filter((t) => t.status === "done");
+      const allDone = tasks.length > 0 && tasksDone.length === tasks.length;
+      const beatCount = tasksDone.filter((t) => t.beatEstimate).length;
+      const progressPct = Math.round((position / trackLen) * 100);
+      const gearBonuses = sumBonuses(equippedArmor, equippedWeapon, equippedMods);
+      const midIndex = Math.max(1, Math.floor(trackLen / 2));
+
+      // Streak bonus when all tasks completed
+      useEffect(() => {
+        if (!allDone) return;
+        if (lastCompleteDay !== day) {
+          const yesterday = new Date(day); yesterday.setDate(yesterday.getDate() - 1);
+          const yKey = yesterday.toISOString().slice(0, 10);
+          setStreak((s) => (lastCompleteDay === yKey ? s + 1 : 1));
+          setLastCompleteDay(day); setCoins((c) => c + 25);
+        }
+      }, [allDone, day, lastCompleteDay]);
+
+      // ---------- Task actions ----------
+      const addTask = (title, estimateMin) => {
+        if (!title || !estimateMin) return;
+        setTasks((prev) => [...prev, { id: uid(), title, estimateMin: Math.max(1, Math.round(estimateMin)), elapsedMs: 0, status: "pending", startedAt: null, completedAt: null, stepsEarned: 0, coinsEarned: 0, beatEstimate: false }]);
+      };
+
+      const startTask = (id) => {
+        const now = Date.now();
+        setTasks((prev) => prev.map((t) => {
+          if (t.id === id) {
+            if (t.status === "done") return t;
+            return { ...t, status: "in-progress", startedAt: now };
+          }
+          if (t.status === "in-progress" && t.startedAt) {
+            const add = now - t.startedAt;
+            return { ...t, status: "pending", startedAt: null, elapsedMs: t.elapsedMs + add };
+          }
+          return t;
+        }));
+      };
+
+      const pauseTask = (id) => {
+        const now = Date.now();
+        setTasks((prev) => prev.map((t) => {
+          if (t.id !== id) return t;
+          if (t.status !== "in-progress" || !t.startedAt) return t;
+          const add = now - t.startedAt;
+          return { ...t, status: "pending", startedAt: null, elapsedMs: t.elapsedMs + add };
+        }));
+      };
+
+      const resetTask = (id) => {
+        setTasks((prev) => prev.map((t) => t.id === id ? { ...t, elapsedMs: 0, status: "pending", startedAt: null, completedAt: null, stepsEarned: 0, coinsEarned: 0, beatEstimate: false } : t));
+      };
+
+      const completeTask = (id) => {
+        setTasks((prev) => {
+          const now = Date.now();
+          const next = prev.map((t) => {
+            if (t.id !== id) return t;
+            let elapsed = t.elapsedMs;
+            if (t.status === "in-progress" && t.startedAt) elapsed += now - t.startedAt;
+            const actualMin = Math.max(0.1, elapsed / 60000);
+            const { steps, coins, beat } = computeReward(t.estimateMin, actualMin);
+            return { ...t, status: "done", startedAt: null, completedAt: now, elapsedMs: elapsed, stepsEarned: steps, coinsEarned: coins, beatEstimate: beat };
+          });
+          const just = next.find((t) => t.id === id);
+          if (just && just.status === "done") {
+            setPosition((p) => clamp(p + just.stepsEarned, 0, trackLen));
+            setCoins((c) => c + just.coinsEarned);
+          }
+          return next;
+        });
+      };
+
+      const deleteTask = (id) => setTasks((prev) => prev.filter((t) => t.id !== id));
+
+      // ---------- Boss milestones ----------
+      const prevPosRef = useRef(position);
+
+      useEffect(() => {
+        const prev = prevPosRef.current; prevPosRef.current = position;
+        if (showBoss) return;
+        const bonuses = sumBonuses(equippedArmor, equippedWeapon, equippedMods);
+        setBossGrace(bonuses.grace);
+        if (!midBossCleared && prev < midIndex && position >= midIndex) {
+          setBossType("goblin"); setBossHP(60); setBossPhase(1); setShowBoss(true); return;
+        }
+        if (!endBossCleared && prev < trackLen && position >= trackLen) {
+          setBossType("dragon"); setBossHP(100); setBossPhase(1); setShowBoss(true); return;
+        }
+      }, [position, trackLen, midBossCleared, endBossCleared, equippedArmor, equippedWeapon, equippedMods, showBoss, midIndex]);
+
+      useEffect(() => {
+        if (!showBoss && position >= trackLen && !endBossCleared) {
+          setBossType("dragon"); setBossHP(100); setBossPhase(1); setShowBoss(true);
+        }
+      }, [showBoss, position, trackLen, endBossCleared]);
+
+      // ---------- Boss Battle (QTE) ----------
+      const [qtePrompt, setQtePrompt] = useState("");
+      const [qteTimeLeft, setQteTimeLeft] = useState(0);
+      const qteTimerRef = useRef(0);
+
+      const startBossRound = () => {
+        const beatCt = tasks.filter((t) => t.beatEstimate).length;
+        const bonuses = sumBonuses(equippedArmor, equippedWeapon, equippedMods);
+        const baseMax = bossType === "dragon" ? 1500 : 1700;
+        const baseMin = bossType === "dragon" ? 550 : 650;
+        const baseWindow = clamp(baseMax - beatCt * 80, baseMin, baseMax);
+        const timeWindow = clamp(baseWindow + bonuses.time, baseMin + 100, baseMax + 300);
+        const letters = ["A","S","D","F","J","K","L",";","↑","↓","←","→"];
+        const prompt = letters[Math.floor(Math.random() * letters.length)];
+        setQtePrompt(prompt); setQteTimeLeft(timeWindow);
+        clearInterval(qteTimerRef.current);
+        const start = Date.now();
+        qteTimerRef.current = setInterval(() => {
+          const left = timeWindow - (Date.now() - start);
+          setQteTimeLeft(left);
+          if (left <= 0) {
+            clearInterval(qteTimerRef.current);
+            if (bossGrace > 0) { setBossGrace((g) => g - 1); setTimeout(() => startBossRound(), 400); }
+            else { setBossPhase(3); }
+          }
+        }, 30);
+      };
+
+      const keyHandler = (e) => {
+        if (!showBoss || bossPhase !== 1) return;
+        const match = (qtePrompt.length === 1 && e.key.toUpperCase() === qtePrompt) ||
+          (qtePrompt === "↑" && e.key === "ArrowUp") || (qtePrompt === "↓" && e.key === "ArrowDown") ||
+          (qtePrompt === "←" && e.key === "ArrowLeft") || (qtePrompt === "→" && e.key === "ArrowRight");
+        if (!match) return;
+        clearInterval(qteTimerRef.current);
+        const beatCt = tasks.filter((t) => t.beatEstimate).length;
+        const bonuses = sumBonuses(equippedArmor, equippedWeapon, equippedMods);
+        const base = 30 + beatCt * 8 + bonuses.dmg;
+        const dmg = bossType === "dragon" ? base : Math.round(base * 0.8);
+        setBossHP((hp) => {
+          const next = clamp(hp - dmg, 0, 100);
+          if (next <= 0) {
+            setBossPhase(2);
+            const loot = bossType === "dragon" ? 50 : 25; setCoins((c) => c + loot);
+            if (bossType === "goblin") setMidBossCleared(true);
+            if (bossType === "dragon") setEndBossCleared(true);
+          } else { setTimeout(() => startBossRound(), 450); }
+          return next;
+        });
+      };
+
+      useEffect(() => { window.addEventListener("keydown", keyHandler); return () => window.removeEventListener("keydown", keyHandler); }, [showBoss, bossPhase, qtePrompt, tasks, equippedArmor, equippedWeapon, equippedMods, bossGrace, bossType]);
+      useEffect(() => { if (showBoss && bossPhase === 1) startBossRound(); }, [showBoss, bossPhase]);
+
+      // ---------- Shop / inventory ----------
+      const availableShop = shop.filter((c) => !c.owned);
+      const ownedShop = shop.filter((c) => c.owned);
+
+      const buyItem = (id) => {
+        const item = shop.find((c) => c.id === id);
+        if (!item || coins < item.price) return;
+        setCoins((c) => c - item.price);
+        setShop((prev) => prev.map((c) => (c.id === id ? { ...c, owned: true } : c)));
+      };
+      const equipItem = (item) => {
+        if (!item?.owned) return;
+        if (item.type === "armor") setEquippedArmor(item.id);
+        if (item.type === "weapon") setEquippedWeapon(item.id);
+        if (item.type === "mod") setEquippedMods((prev) => (prev.includes(item.id) ? prev : [...prev, item.id]));
+      };
+      const unequipMod = (id) => setEquippedMods((prev) => prev.filter((m) => m !== id));
+
+      return (
+        <div className="min-h-screen bg-gradient-to-br from-sky-50 via-violet-50 to-emerald-50 p-4 text-zinc-900">
+          <div className="mx-auto max-w-6xl space-y-4">
+            {/* Header */}
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="h-10 w-10 rounded-xl bg-sky-500 grid place-items-center text-white text-xl">⚡️</div>
+                <div>
+                  <div className="text-xl font-bold">FocusQuest</div>
+                  <div className="text-xs text-zinc-600">Gamify your work • {day}</div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button className="rounded-xl border border-zinc-300 bg-white px-3 py-2 text-sm hover:bg-zinc-50" onClick={() => setShowHelp(true)}>How to play</button>
+                <button className="rounded-xl border border-zinc-300 bg-white px-3 py-2 text-sm hover:bg-zinc-50" onClick={() => setSettingsOpen((s) => !s)}>Settings</button>
+                <button className="rounded-xl border border-emerald-300 bg-emerald-500/90 px-3 py-2 text-sm font-semibold text-white shadow hover:bg-emerald-500" onClick={() => {
+                  setDay(todayKey()); setPosition(0); setTasks([]);
+                  setMidBossCleared(false); setEndBossCleared(false);
+                  setShowBoss(false); setBossPhase(0); setBossType(""); setBossHP(100);
+                }}>New Day</button>
+              </div>
+            </div>
+
+            {/* Stats Row */}
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+              <SmallStat label="Track" value={`${position}/${trackLen}`} hint={`${progressPct}% complete`} />
+              <SmallStat label="Coins" value={`🪙 ${coins}`} hint="Finish tasks & bosses" />
+              <SmallStat label="Tasks" value={`${tasksDone.length}/${tasks.length}`} hint={`${beatCount} beat estimates`} />
+              <SmallStat label="Gear Bonus" value={`+${gearBonuses.dmg} dmg`} hint={`+${gearBonuses.time}ms window • ${gearBonuses.grace} grace`} />
+              <SmallStat label="Streak" value={`${streak} day${streak === 1 ? "" : "s"}`} hint={lastCompleteDay ? `last: ${lastCompleteDay}` : "finish a day to start"} />
+            </div>
+
+            {/* Board */}
+            <SectionCard title="Day Track" right={<div className="flex items-center gap-2 text-sm"><span>Length</span><input type="number" className="w-20 rounded-lg border border-zinc-300 bg-white px-2 py-1 text-sm" value={trackLen} min={10} max={100} onChange={(e) => { const v = clamp(parseInt(e.target.value || "0"), 10, 100); setPosition((p) => clamp(p, 0, v)); setTrackLen(v); }} /></div>}>
+              <div className="flex items-center gap-3">
+                <PixelAvatar armorId={equippedArmor} weaponId={equippedWeapon} />
+                <div className="flex-1">
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-zinc-200"><div className="h-full bg-sky-500" style={{ width: `${progressPct}%` }} /></div>
+                  <div className="mt-2 text-xs text-zinc-600">Bosses at halfway (🗿) and end (🐉). Beat estimates for bonus steps & coins.</div>
+                </div>
+              </div>
+              <div className="mt-4 grid grid-cols-10 sm:grid-cols-12 md:grid-cols-15 gap-2">
+                {Array.from({ length: trackLen }).map((_, i) => (
+                  <div key={i} className="relative">
+                    <Tile index={i} active={i < position} isMid={i === (Math.max(1, Math.floor(trackLen / 2)) - 1)} isEnd={i === trackLen - 1} />
+                    {i === position - 1 && (<div className="pointer-events-none absolute -top-3 left-1/2 -translate-x-1/2"><PixelAvatar armorId={equippedArmor} weaponId={equippedWeapon} /></div>)}
+                  </div>
+                ))}
+              </div>
+            </SectionCard>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {/* Tasks */}
+              <SectionCard title="Tasks">
+                <TaskCreator onAdd={addTask} />
+                <div className="mt-3 space-y-2">
+                  {tasks.length === 0 && (<div className="rounded-xl border border-dashed border-zinc-300 p-6 text-center text-sm text-zinc-600">No tasks yet. Add your first task above (try a 25–50 min deep work block).</div>)}
+                  {tasks.map((t) => (
+                    <TaskRow key={t.id} task={t} onStart={() => startTask(t.id)} onPause={() => pauseTask(t.id)} onReset={() => resetTask(t.id)} onComplete={() => completeTask(t.id)} onDelete={() => deleteTask(t.id)} />
+                  ))}
+                </div>
+              </SectionCard>
+
+              {/* Shop */}
+              <SectionCard title="Gear Shop & Inventory" right={<div className="text-sm text-zinc-600">Balance: <span className="font-semibold">🪙 {coins}</span></div>}>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">Shop</div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {availableShop.length === 0 && <div className="col-span-2 text-sm text-zinc-500">Everything bought. Nice!</div>}
+                      {availableShop.map((c) => (
+                        <div key={c.id} className="rounded-xl border border-zinc-200 bg-white p-3">
+                          <div className="text-sm font-semibold">{c.name}</div>
+                          <div className="text-xs text-zinc-500">{c.type} {c.tier ? \`T\${c.tier}\` : ""}</div>
+                          <div className="mt-2 flex items-center justify-between">
+                            <div className="text-sm">🪙 {c.price}</div>
+                            <button className={\`rounded-lg px-2 py-1 text-sm font-medium \${coins >= c.price ? "bg-emerald-500 text-white" : "bg-zinc-200 text-zinc-600"}\`} onClick={() => buyItem(c.id)} disabled={coins < c.price}>Buy</button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">Owned / Equip</div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {ownedShop.length === 0 && <div className="col-span-2 text-sm text-zinc-500">No items yet. Finish tasks & beat estimates to earn coins!</div>}
+                      {ownedShop.map((c) => (
+                        <div key={c.id} className={\`rounded-xl border \${c.id === equippedArmor || c.id === equippedWeapon || equippedMods.includes(c.id) ? "border-emerald-400" : "border-zinc-200"} bg-white p-3\`}>
+                          <div className="text-sm font-semibold">{c.name}</div>
+                          <div className="text-xs text-zinc-500">{c.type} {c.tier ? \`T\${c.tier}\` : ""}</div>
+                          <div className="mt-2 flex items-center justify-between gap-2">
+                            {c.type === "mod" && equippedMods.includes(c.id) ? (
+                              <button className="rounded-lg border border-zinc-300 bg-white px-2 py-1 text-xs hover:bg-zinc-50" onClick={() => unequipMod(c.id)}>Unequip</button>
+                            ) : (
+                              <button className="rounded-lg border border-zinc-300 bg-white px-2 py-1 text-xs hover:bg-zinc-50" onClick={() => equipItem(c)}>Equip</button>
+                            )}
+                            {(c.type === "armor" && equippedArmor === c.id) || (c.type === "weapon" && equippedWeapon === c.id) || (c.type === "mod" && equippedMods.includes(c.id)) ? (
+                              <span className="text-xs text-emerald-600">Equipped</span>
+                            ) : (
+                              <span className="text-xs text-zinc-400">—</span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </SectionCard>
+            </div>
+
+            {/* Recap & Badges */}
+            <SectionCard title="Daily Recap & Achievements">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="rounded-xl border border-zinc-200 bg-white p-4">
+                  <div className="text-sm font-semibold">Task Results</div>
+                  <div className="mt-2 divide-y">
+                    {tasksDone.length === 0 && <div className="text-sm text-zinc-500">Complete tasks to see results.</div>}
+                    {tasksDone.map((t) => (
+                      <div key={t.id} className="py-2 text-sm flex items-center justify-between">
+                        <div>
+                          <div className="font-medium">{t.title}</div>
+                          <div className="text-xs text-zinc-500">Est {t.estimateMin}m • Actual {Math.round(t.elapsedMs / 60000)}m</div>
+                        </div>
+                        <div className="text-right">
+                          <div className={\`text-xs \${t.beatEstimate ? "text-emerald-600" : "text-zinc-600"}\`}>{t.beatEstimate ? "Beat" : "Finished"}</div>
+                          <div className="text-xs">+{t.stepsEarned} steps • 🪙 {t.coinsEarned}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-zinc-200 bg-white p-4">
+                  <div className="text-sm font-semibold">Badges</div>
+                  <div className="mt-2 grid grid-cols-2 gap-2 text-sm">
+                    <BadgeItem active={beatCount >= 1} label="Speedrunner" hint="Beat 1+ estimates today" />
+                    <BadgeItem active={beatCount >= 3} label="Time Tamer" hint="Beat 3+ estimates" />
+                    <BadgeItem active={position >= midIndex && midBossCleared} label="Goblinsbane" hint="Defeat the Stone Goblin" />
+                    <BadgeItem active={position >= trackLen && endBossCleared} label="Dragon Slayer" hint="Defeat the Dragon" />
+                    <BadgeItem active={streak >= 3} label="Streak 3" hint="3-day streak" />
+                    <BadgeItem active={streak >= 7} label="Streak 7" hint="7-day streak" />
+                  </div>
+                </div>
+              </div>
+            </SectionCard>
+
+            {/* Boss Modal */}
+            {showBoss && (
+              <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
+                <div className="w-full max-w-lg rounded-2xl border border-zinc-200 bg-white p-5 shadow-xl">
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <div className="text-lg font-bold">{bossType === "goblin" ? "Stone Goblin" : "Dragon"} Battle</div>
+                      <div className="text-sm text-zinc-600">Quick-time challenge — press the shown key in time to deal damage!</div>
+                    </div>
+                    <button className="rounded-lg border border-zinc-300 bg-white px-2 py-1 text-sm" onClick={() => { setShowBoss(false); setBossPhase(0); }}>Close</button>
+                  </div>
+                  <div className="mt-3 rounded-xl bg-zinc-50 p-3 text-xs text-zinc-600 flex items-center justify-between">
+                    <div>Bonuses: +{gearBonuses.time}ms window • +{gearBonuses.dmg} dmg • Grace: {bossGrace}</div>
+                    <div>Beats: {tasks.filter((t)=>t.beatEstimate).length}</div>
+                  </div>
+                  <div className="mt-3 mb-2 h-2 w-full overflow-hidden rounded-full bg-zinc-200">
+                    <div className={\`h-full \${bossType === "dragon" ? "bg-rose-500" : "bg-amber-500"}\`} style={{ width: \`\${bossHP}%\` }} />
+                  </div>
+                  {bossPhase === 1 && (
+                    <div className="grid place-items-center gap-3 py-6">
+                      <PixelAvatar armorId={equippedArmor} weaponId={equippedWeapon} />
+                      <div className="text-3xl">{bossType === "dragon" ? "🐉" : "🗿"}</div>
+                      <div className="text-sm text-zinc-600">Press this:</div>
+                      <div className="rounded-2xl border border-zinc-300 bg-zinc-50 px-6 py-4 text-4xl font-bold tracking-widest">{qtePrompt}</div>
+                      <div className="text-xs text-zinc-500">Time left: {Math.max(0, Math.ceil(qteTimeLeft / 100) / 10)}s</div>
+                    </div>
+                  )}
+                  {bossPhase === 2 && (
+                    <div className="grid place-items-center gap-3 py-6 text-center">
+                      <div className="text-4xl">🏆</div>
+                      <div className="text-lg font-semibold">Victory!</div>
+                      <div className="text-sm text-zinc-600">Loot: 🪙 {bossType === "dragon" ? 50 : 25} coins.</div>
+                      <button className="rounded-xl bg-emerald-500 px-3 py-2 text-sm font-semibold text-white" onClick={() => { setShowBoss(false); setBossPhase(0); }}>Close</button>
+                    </div>
+                  )}
+                  {bossPhase === 3 && (
+                    <div className="grid place-items-center gap-3 py-6 text-center">
+                      <div className="text-4xl">{bossType === "dragon" ? "🐉" : "🗿"}</div>
+                      <div className="text-lg font-semibold">It got away… this time.</div>
+                      <div className="text-sm text-zinc-600">Upgrade gear or beat more estimates for a stronger strike.</div>
+                      <button className="rounded-xl bg-sky-500 px-3 py-2 text-sm font-semibold text-white" onClick={() => { setBossPhase(1); setBossHP(bossType === "dragon" ? 100 : 60); startBossRound(); }}>Retry</button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Settings Drawer */}
+            {settingsOpen && (
+              <div className="fixed inset-0 z-40 flex">
+                <div className="h-full w-96 bg-white border-r border-zinc-200 p-4 shadow-2xl">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-semibold">Settings</div>
+                    <button className="rounded-lg border border-zinc-300 bg-white px-2 py-1 text-sm" onClick={() => setSettingsOpen(false)}>Close</button>
+                  </div>
+                  <div className="mt-4 space-y-4 text-sm">
+                    <div>
+                      <div className="text-xs uppercase text-zinc-500">Reset Day</div>
+                      <div className="mt-2 flex gap-2">
+                        <button className="rounded-xl border border-zinc-300 bg-white px-3 py-2 hover:bg-zinc-50" onClick={() => {
+                          setPosition(0); setTasks((prev) => prev.map((t) => ({ ...t, status: "pending", startedAt: null, completedAt: null, elapsedMs: 0, stepsEarned: 0, coinsEarned: 0, beatEstimate: false })));
+                          setMidBossCleared(false); setEndBossCleared(false); setBossType(""); setBossHP(100); setBossPhase(0); setShowBoss(false);
+                        }}>Soft Reset (keep tasks)</button>
+                        <button className="rounded-xl bg-rose-500 px-3 py-2 font-semibold text-white hover:bg-rose-600" onClick={() => {
+                          setDay(todayKey()); setPosition(0); setTasks([]);
+                          setMidBossCleared(false); setEndBossCleared(false); setBossType(""); setBossHP(100); setBossPhase(0); setShowBoss(false);
+                        }}>New Day (clear tasks)</button>
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs uppercase text-zinc-500">Data</div>
+                      <div className="mt-2 flex gap-2">
+                        <button className="rounded-xl border border-zinc-300 bg-white px-3 py-2 hover:bg-zinc-50" onClick={() => {
+                          const blob = new Blob([localStorage.getItem(LS_KEY) ?? "{}"], { type: "application/json" });
+                          const url = URL.createObjectURL(blob); const a = document.createElement("a");
+                          a.href = url; a.download = `focusquest-${day}.json`; a.click(); URL.revokeObjectURL(url);
+                        }}>Export Save</button>
+                        <button className="rounded-xl border border-zinc-300 bg-white px-3 py-2 hover:bg-zinc-50" onClick={() => {
+                          if (!confirm("Reset all FocusQuest data? This cannot be undone.")) return;
+                          localStorage.removeItem(LS_KEY); location.reload();
+                        }}>Reset All Data</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex-1 bg-black/30" onClick={() => setSettingsOpen(false)} />
+              </div>
+            )}
+
+            {/* Help Modal */}
+            {showHelp && (
+              <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
+                <div className="w-full max-w-2xl rounded-2xl border border-zinc-200 bg-white p-6 shadow-xl">
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <div className="text-lg font-bold">How to Play FocusQuest</div>
+                      <div className="text-sm text-zinc-600">Beat your estimates, move further, earn coins, and face bosses at halfway and at the end.</div>
+                    </div>
+                    <button className="rounded-lg border border-zinc-300 bg-white px-2 py-1 text-sm" onClick={() => setShowHelp(false)}>Close</button>
+                  </div>
+                  <ol className="mt-4 list-decimal space-y-2 pl-5 text-sm">
+                    <li>Add tasks with realistic estimates (10–90 min each works best).</li>
+                    <li>Start a task timer. Pause if you switch context. Only one task runs at once.</li>
+                    <li>Completing tasks advances you along the track. Beating estimates grants bonus steps & more coins.</li>
+                    <li>Reach halfway to fight the 🗿 Stone Goblin (small loot). Reach the end to fight the 🐉 Dragon (bigger loot).</li>
+                    <li>Spend coins in the shop. Gear adds damage/time and grace. Keep a completion streak to stack badges.</li>
+                  </ol>
+                  <div className="mt-4 rounded-xl bg-zinc-50 p-4 text-xs text-zinc-600">Movement formula: base steps ≈ estimate/15min. Beat estimate → bonus scales with % time saved. Overrun → small penalty (min 1 step). Steps capped at 12 per task.</div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<FocusQuest />);
+  </script>
+</body>
+</html>
